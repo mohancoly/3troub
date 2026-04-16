@@ -1,0 +1,418 @@
+24-Mar-2026 - Knowledge Article
+
+Title
+EPM Agent and SSL TLS Inspection
+Question
+Does the EPM Agent Support SSL/TLS inspection or man-in-the-middle inspection?
+Answer
+No, the EPM agent does not support man-in-the-middle TLS inspection of web traffic
+
+In order to validate if SSL Inspection is in-place, there's a few options depending upon your platform (be sure to use a URL that is applicable to region as outlined here - (https://docs.cyberark.com/epm/latest/en/content/installation/network-setup.htm?Highlight=firewall#ServiceURLsforaspecificregion)
+
+Windows
+Use a simple script (example attached to this KB) which will prompt you for parameters for comparison.
+Be sure to supply the full URL (ex: https://agents-na.epm.cyberark.com)
+Example of a known good return of the server certificate's subject
+Example script output
+
+Example of a known SSL inspected traffic output. (Bad)
+The reason why this is bad is the subject of the certificate presented (in this case - the issuer of the certificate is an internal PKI issuer for a sample customer in government vs. CyberArk being the issuer) that is imitating a valid issuer is NOT the CyberArk EPM-related issuer mentioned in the previous screenshot of a known good result where CyberArk signed the certificate via GlobalSign.
+Example of known SSL intercepted traffic output
+ 
+
+SSL TLS Inspection considerations
+We have proxy support built into the Windows and Linux Agent for direct proxy connections. For Mac OS, we would leverage the OS configuration.
+https://docs.cyberark.com/Product-Doc/OnlineHelp/EPM/Latest/en/Content/Installation/Windows-InstallAgents.htm#Installationwithconfigurationdetails
+Many proxies/web application firewalls such as zScaler, Websense, Fortigate, etc have the ability to do man-in-the-middle TLS inspection of web traffic. The EPM agent does not support this. So we need to exempt the EPM agent from SSL Inspection. For more information, please see this:
+Example: https://help.zscaler.com/zia/certificate-pinning-and-ssl-inspection
+
+
+Network Setup - CYberark EPM documentaiton 
+
+Network setup
+This topic lists the EPM service URLs for EPM agents on all platforms.
+
+This is relevant for organizations that implement outbound traffic rules.
+
+Overview
+To use the CyberArk EPM SaaS solution, endpoints where EPM agents are installed must have network access to different service URLs.
+
+Use the URLs list below to configure your network components, such as firewall, WAF and proxy, to make sure endpoints with EPM agents have access to these URLs.
+
+In addition, make sure that third-party application installed on the endpoints do not block communication with EPM SaaS.
+
+Service URLs
+If your organization uses SSL inspection, you must configure it to exclude the EPM service URLs listed in the following table.
+
+This ensures communication between EPM agents and the SaaS service.
+
+The following table describes the different types of URLs:
+
+URL type
+
+Description
+
+URLs
+
+CloudFlare IP ranges
+
+The web application firewall IP ranges.
+
+Open all IP ranges that are listed in https://www.cloudflare.com/ips/.
+
+Cloudflare IPV4 text list
+173.245.48.0/20
+103.21.244.0/22
+103.22.200.0/22
+103.31.4.0/22
+141.101.64.0/18
+108.162.192.0/18
+190.93.240.0/20
+188.114.96.0/20
+197.234.240.0/22
+198.41.128.0/17
+162.158.0.0/15
+104.16.0.0/13
+104.24.0.0/14
+172.64.0.0/13
+131.0.72.0/22
+
+Cloudflare IPV6 textlist
+2400:cb00::/32
+2606:4700::/32
+2803:f800::/32
+2405:b500::/32
+2405:8100::/32
+2a06:98c0::/29
+2c0f:f248::/32
+
+These IP ranges are managed by CloudFlare. Follow CloudFlare updates for potential updates to the list of IPs.
+
+Tenant URL
+
+The main access point to the EPM service management console.
+
+Open the tenant URL that is specific to your region, as listed in Service URLs for a specific region.
+
+You can configure access to all EPM tenants URLs with *.epm.cyberark.com, instead of using the specific URL for your region.
+
+Open port 443 HTTPS.
+
+S3 URL
+
+The main access point to EPM service downloadable content, such as agents installers, packages, etc.
+
+Open the S3 URL that is specific to your region, as listed in Service URLs for a specific region.
+
+Open port 443 HTTPS.
+
+URL for endpoint-service communication
+
+The main access point for agent communication to the CyberArk EPM service.
+
+Open the service-endpoint communication URL that is specific to your region, as listed in Service URLs for a specific region.
+
+Open port 443 TLS over TCP.
+
+Service URLs for a specific region
+The following table describes the URLs for each region.
+
+Open the network to the tenant, S3 bucket, and endpoint-service communication URLs that are relevant to your region.
+
+You can check where the tenant region is according to the login URL you use to access the EPM console. This login URL matches the tenant URL listed below for your region.
+
+After you sign in to your tenant, the URL shows your assigned tenant manager URL in the following structure: <region><number>. Use this number when you set the tenant URL. For example, NA123.
+
+Region
+
+URL type
+
+URL	
+ 
+
+USA
+
+ 
+
+ 
+
+Tenant URL
+
+login.epm.cyberark.com/login
+
+NAXXX.epm.cyberark.com
+
+dispatcher1.epm.cyberark.com
+
+S3 URL
+
+epm-downloads.s3.us-east-2.amazonaws.com
+
+https://files-na.epm.cyberark.com
+
+URL for endpoints-service communication
+
+agents-na.epm.cyberark.com
+
+Germany
+
+ 
+
+ 
+
+Tenant URL
+
+eu.epm.cyberark.com/login
+
+euXXX.epm.cyberark.com
+
+S3 URL
+
+epm-downloads-eu.s3.eu-central-1.amazonaws.com
+
+https://files-eu.epm.cyberark.com
+
+URL for endpoints-service communication
+
+agents-eu.epm.cyberark.com
+
+Switzerland
+
+ 
+
+ 
+
+Tenant URL
+
+ch.epm.cyberark.com/login
+
+chXXX.epm.cyberark.com
+
+S3 URL
+
+epm-downloads-ch.s3.eu-central-2.amazonaws.com
+
+https://files-ch.epm.cyberark.com
+
+URL for endpoints-service communication
+
+agents-ch.epm.cyberark.com
+
+UK
+
+ 
+
+ 
+
+Tenant URL
+
+uk.epm.cyberark.com/login
+
+ukXXX.epm.cyberark.com
+
+S3 URL
+
+epm-downloads-uk.s3.eu-west-2.amazonaws.com
+
+https://files-uk.epm.cyberark.com
+
+URL for endpoints-service communication
+
+agents-uk.epm.cyberark.com
+
+Australia
+
+ 
+
+ 
+
+Tenant URL
+
+au.epm.cyberark.com/login
+
+auXXX.epm.cyberark.com
+
+S3 URL
+
+epm-downloads-au.s3.ap-southeast-2.amazonaws.com
+
+https://files-au.epm.cyberark.com
+
+URL for endpoints-service communication
+
+agents-au.epm.cyberark.com
+
+Brazil
+
+ 
+
+ 
+
+Tenant URL
+
+br.epm.cyberark.com/login
+
+brXXX.epm.cyberark.com
+
+S3 URL
+
+epm-downloads-br.s3.sa-east-1.amazonaws.com
+
+https://files-br.epm.cyberark.com
+
+URL for endpoints-service communication
+
+agents-br.epm.cyberark.com
+
+Canada
+
+ 
+
+ 
+
+Tenant URL
+
+ca.epm.cyberark.com/login
+
+caXXX.epm.cyberark.com
+
+S3 URL
+
+epm-downloads-ca.s3.ca-central-1.amazonaws.com
+
+https://files-ca.epm.cyberark.com
+
+URL for endpoints-service communication
+
+agents-ca.epm.cyberark.com
+
+India
+
+ 
+
+ 
+
+Tenant URL
+
+in.epm.cyberark.com/login
+
+inXXX.epm.cyberark.com
+
+S3 URL
+
+epm-downloads-in.s3.ap-south-1.amazonaws.com
+
+https://files-in.epm.cyberark.com
+
+URL for endpoints-service communication
+
+agents-in.epm.cyberark.com
+
+Japan
+
+ 
+
+ 
+
+Tenant URL
+
+jp.epm.cyberark.com/login
+
+jpXXX.epm.cyberark.com
+
+S3 URL
+
+epm-downloads-jp.s3.ap-northeast-1.amazonaws.com
+
+https://files-jp.epm.cyberark.com
+
+URL for endpoints-service communication
+
+agents-jp.epm.cyberark.com
+
+Singapore
+
+ 
+
+ 
+
+Tenant URL
+
+sg.epm.cyberark.com/login
+
+sgXXX.epm.cyberark.com
+
+S3 URL
+
+epm-downloads-sg.s3.ap-southeast-1.amazonaws.com
+
+https://files-sg.epm.cyberark.com
+
+URL for endpoints-service communication
+
+agents-sg.epm.cyberark.com
+
+Italy
+
+ 
+
+ 
+
+Tenant URL
+
+it.epm.cyberark.com/login
+
+itXXX.epm.cyberark.com
+
+S3 URL
+
+epm-downloads-it.s3.eu-south-1.amazonaws.com
+
+https://files-it.epm.cyberark.com
+
+URL for endpoints-service communication
+
+agents-it.epm.cyberark.com
+
+UAE
+
+ 
+
+ 
+
+Tenant URL
+
+ae.epm.cyberark.com/login
+
+aeXXX.epm.cyberark.com
+
+S3 URL
+
+epm-downloads-ae.s3.me-central-1.amazonaws.com
+
+https://files-ae.epm.cyberark.com
+
+URL for endpoints-service communication
+
+agents-ae.epm.cyberark.com
+
+Federal
+
+ 
+Tenant URL
+
+login.epm.cyberarkgov.cloud/login
+
+https://naXX.epm.cyberarkgov.cloud
+
+S3 URL
+
+epm-epmprod-us-gov-west-1-epm-downloads.s3-us-gov-west-1.amazonaws.com
+
+https://files.epm.cyberarkgov.cloud
+
+URL for endpoints-service communication
+
+apro78z9ol93v-ats.iot.us-gov-west-1.amazonaws.com
+
+ 
