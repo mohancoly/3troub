@@ -1,0 +1,50 @@
+# Ignore SSL warnings
+[Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+
+function Test-SSL {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$uri
+    )
+
+    Write-Host "`nAnalyzing certificate for $uri..." -ForegroundColor Cyan
+    $req = [Net.HttpWebRequest]::Create($uri)
+    
+    try { 
+        $null = $req.GetResponse() 
+    } catch { }
+
+    $cert = $req.ServicePoint.Certificate
+
+    if ($cert) {
+        $subject = $cert.Subject
+        $issuer  = $cert.Issuer
+        # Convert expiration string to a datetime object for comparison
+        $expiry  = [DateTime]::Parse($cert.GetExpirationDateString())
+        $today   = Get-Date
+
+        "--------------------------------------------------"
+        "URI:        $uri"
+        "Subject:    $subject"
+        "Issuer:     $issuer"
+        "Expires:    $($expiry.ToString('yyyy-MM-dd HH:mm:ss'))"
+        "--------------------------------------------------"
+
+        # 1. Check for Expiration
+        if ($expiry -lt $today) {
+            Write-Error "CRITICAL: This certificate expired on $($expiry.ToShortDateString())!"
+        } elseif ($expiry -lt $today.AddDays(30)) {
+            Write-Warning "Warning: This certificate expires in less than 30 days."
+        } else {
+            Write-Host "Check: Certificate is currently valid." -ForegroundColor Green
+        }
+        
+    } else { 
+        Write-Error "No certificate could be retrieved." 
+    }
+}
+
+# --- Interactive Prompts ---
+$inputUri  = Read-Host "Enter the URI (e.g., https://agents-na.epm.cyberark.com)"
+
+Test-SSL -uri $inputUri
