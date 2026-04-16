@@ -1,68 +1,408 @@
-# Ignore SSL warnings
+# ==============================================================================
+# EPM Agent Network Diagnostic Script
+# Purpose : Diagnose connectivity on EPM Agent installed Windows machines
+# Checks  : DNS Resolution, Port 443 TCP, SSL Certificate Detail,
+#           SSL Inspection Detection, Cloudflare IP Reachability
+# Log     : Plain text log saved to script directory
+# Based on: CyberArk EPM Knowledge Article - EPM Agent and SSL TLS Inspection
+# ==============================================================================
+
 [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-function Test-SSL {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$uri
-    )
+# ==============================================================================
+# REGION MAP
+# FIX: Keys are defined as [string] not [int].
+#      [ordered]@{} is an OrderedDictionary. If keys are stored as [int], the
+#      indexer $map[$intValue] resolves positionally (0-based), not by key value,
+#      so selecting "1" returned the 2nd entry (Germany) instead of USA.
+#      String keys force a true key lookup, not positional resolution.
+# ==============================================================================
+$regionMap = [ordered]@{
+    "1"  = @{ Name = "USA"               ; URL = "https://agents-na.epm.cyberark.com" }
+    "2"  = @{ Name = "Germany"           ; URL = "https://agents-eu.epm.cyberark.com" }
+    "3"  = @{ Name = "Switzerland"       ; URL = "https://agents-ch.epm.cyberark.com" }
+    "4"  = @{ Name = "UK"                ; URL = "https://agents-uk.epm.cyberark.com" }
+    "5"  = @{ Name = "Australia"         ; URL = "https://agents-au.epm.cyberark.com" }
+    "6"  = @{ Name = "Brazil"            ; URL = "https://agents-br.epm.cyberark.com" }
+    "7"  = @{ Name = "Canada"            ; URL = "https://agents-ca.epm.cyberark.com" }
+    "8"  = @{ Name = "India"             ; URL = "https://agents-in.epm.cyberark.com" }
+    "9"  = @{ Name = "Japan"             ; URL = "https://agents-jp.epm.cyberark.com" }
+    "10" = @{ Name = "Singapore"         ; URL = "https://agents-sg.epm.cyberark.com" }
+    "11" = @{ Name = "Italy"             ; URL = "https://agents-it.epm.cyberark.com" }
+    "12" = @{ Name = "UAE"               ; URL = "https://agents-ae.epm.cyberark.com" }
+    "13" = @{ Name = "Federal (GovCloud)"; URL = "https://apro78z9ol93v-ats.iot.us-gov-west-1.amazonaws.com" }
+}
 
-    Write-Host "`nAnalyzing certificate for $uri..." -ForegroundColor Cyan
-    $req = [Net.HttpWebRequest]::Create($uri)
-    
-    try { 
-        $null = $req.GetResponse() 
-    } catch { }
+# ==============================================================================
+# CLOUDFLARE IPv4 RANGES
+# Source: https://www.cloudflare.com/ips/
+# ==============================================================================
+$cloudflareIPv4Ranges = @(
+    "173.245.48.0/20",
+    "103.21.244.0/22",
+    "103.22.200.0/22",
+    "103.31.4.0/22",
+    "141.101.64.0/18",
+    "108.162.192.0/18",
+    "190.93.240.0/20",
+    "188.114.96.0/20",
+    "197.234.240.0/22",
+    "198.41.128.0/17",
+    "162.158.0.0/15",
+    "104.16.0.0/13",
+    "104.24.0.0/14",
+    "172.64.0.0/13",
+    "131.0.72.0/22"
+)
 
-    $cert = $req.ServicePoint.Certificate
+$cloudflareIPv6Ranges = @(
+    "2400:cb00::/32",
+    "2606:4700::/32",
+    "2803:f800::/32",
+    "2405:b500::/32",
+    "2405:8100::/32",
+    "2a06:98c0::/29",
+    "2c0f:f248::/32"
+)
+
+# ==============================================================================
+# LOG SETUP
+# ==============================================================================
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (-not $scriptDir) { $scriptDir = $PWD.Path }
+$timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
+$logLines  = [System.Collections.Generic.List[string]]::new()
+
+function Write-Log {
+    param([string]$Message, [string]$Color = "White")
+    Write-Host $Message -ForegroundColor $Color
+    $logLines.Add($Message)
+}
+
+function Write-Section {
+    param([string]$Title)
+    $sep = "-" * 70
+    Write-Log ""
+    Write-Log $sep
+    Write-Log "  $Title"
+    Write-Log $sep
+}
+
+function Get-FirstIPFromCIDR {
+    param([string]$CIDR)
+    return ($CIDR -split "/")[0]
+}
+
+# ==============================================================================
+# HEADER
+# ==============================================================================
+Clear-Host
+Write-Log "======================================================================"
+Write-Log "  CyberArk EPM Agent - Network Diagnostic Script"
+Write-Log "  Run Date : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+Write-Log "  Host     : $env:COMPUTERNAME"
+Write-Log "  User     : $env:USERNAME"
+Write-Log "  PS Ver   : $($PSVersionTable.PSVersion)"
+Write-Log "======================================================================"
+
+# ==============================================================================
+# STEP 1 - REGION SELECTION
+# FIX: Read-Host returns a [string]. We keep $choice as a [string] to match the
+#      string keys in $regionMap. .Contains() is the correct method on
+#      OrderedDictionary (not .ContainsKey() which does not exist on that type).
+# ==============================================================================
+Write-Section "STEP 1 - SELECT YOUR EPM REGION"
+Write-Log ""
+
+foreach ($key in $regionMap.Keys) {
+    Write-Log ("  [{0,2}]  {1}" -f $key, $regionMap[$key].Name)
+}
+Write-Log ""
+
+do {
+    $choice = (Read-Host "  Enter region number").Trim()
+    if (-not $regionMap.Contains($choice)) {
+        Write-Host "  Invalid. Enter a number between 1 and $($regionMap.Count)." -ForegroundColor Yellow
+        $choice = $null
+    }
+} while ($null -eq $choice)
+
+$selectedRegion = $regionMap[$choice]
+$regionName     = $selectedRegion.Name
+$agentURL       = $selectedRegion.URL
+$agentHost      = ([Uri]$agentURL).Host
+$logFile        = Join-Path $scriptDir ("EPM-Diagnostic-{0}-{1}.txt" -f ($regionName -replace '[^a-zA-Z0-9]', ''), $timestamp)
+
+Write-Log ""
+Write-Log "  Region    : $regionName"
+Write-Log "  Agent URL : $agentURL"
+Write-Log "  Log File  : $logFile"
+
+# ==============================================================================
+# STEP 2 - DNS RESOLUTION
+# ==============================================================================
+Write-Section "STEP 2 - DNS RESOLUTION"
+Write-Log ""
+Write-Log "  Host : $agentHost"
+Write-Log ""
+
+try {
+    $dnsResult   = Resolve-DnsName -Name $agentHost -ErrorAction Stop
+    $resolvedIPs = $dnsResult |
+                   Where-Object { $_.Type -eq "A" -or $_.Type -eq "AAAA" } |
+                   Select-Object -ExpandProperty IPAddress
+
+    if ($resolvedIPs) {
+        Write-Log "  [PASS] DNS resolved" -Color Green
+        foreach ($ip in $resolvedIPs) {
+            Write-Log "         $ip"
+        }
+    } else {
+        Write-Log "  [FAIL] No A/AAAA records returned" -Color Red
+    }
+} catch {
+    Write-Log "  [FAIL] $($_.Exception.Message)" -Color Red
+}
+
+# ==============================================================================
+# STEP 3 - PORT 443 TCP CONNECTIVITY
+# ==============================================================================
+Write-Section "STEP 3 - PORT 443 TCP CONNECTIVITY"
+Write-Log ""
+Write-Log "  Host : ${agentHost}:443"
+Write-Log ""
+
+try {
+    $tcpTest = Test-NetConnection -ComputerName $agentHost -Port 443 -WarningAction SilentlyContinue
+
+    if ($tcpTest.TcpTestSucceeded) {
+        Write-Log "  [PASS] Port 443 reachable" -Color Green
+        Write-Log "         RemoteAddress  : $($tcpTest.RemoteAddress)"
+        Write-Log "         RemotePort     : $($tcpTest.RemotePort)"
+        Write-Log "         InterfaceAlias : $($tcpTest.InterfaceAlias)"
+        Write-Log "         SourceAddress  : $($tcpTest.SourceAddress.IPAddress)"
+    } else {
+        Write-Log "  [FAIL] Port 443 not reachable" -Color Red
+    }
+} catch {
+    Write-Log "  [FAIL] $($_.Exception.Message)" -Color Red
+}
+
+# ==============================================================================
+# STEP 4 - SSL CERTIFICATE DETAIL
+# ==============================================================================
+Write-Section "STEP 4 - SSL CERTIFICATE DETAIL"
+Write-Log ""
+Write-Log "  URL : $agentURL"
+Write-Log ""
+
+$cert         = $null
+$servicePoint = $null
+
+try {
+    $webRequest         = [Net.HttpWebRequest]::Create($agentURL)
+    $webRequest.Timeout = 15000
+    $servicePoint       = $webRequest.ServicePoint
+
+    try {
+        $webRequest.GetResponse() | Out-Null
+    } catch {
+        Write-Log "  [INFO] HTTP response: $($_.Exception.Message)" -Color DarkGray
+    }
+
+    $cert = $webRequest.ServicePoint.Certificate
 
     if ($cert) {
-        $subject = $cert.Subject
-        $issuer  = $cert.Issuer
-        # Convert expiration string to a datetime object for comparison
-        $expiry  = [DateTime]::Parse($cert.GetExpirationDateString())
-        $today   = Get-Date
+        Write-Log "  [PASS] Certificate retrieved" -Color Green
+        Write-Log ""
 
-        "--------------------------------------------------"
-        "URI:        $uri"
-        "Subject:    $subject"
-        "Issuer:     $issuer"
-        "Expires:    $($expiry.ToString('yyyy-MM-dd HH:mm:ss'))"
-        "--------------------------------------------------"
+        Write-Log "  -- ServicePoint --" -Color Cyan
+        Write-Log "     Address             : $($servicePoint.Address)"
+        Write-Log "     ConnectionLimit     : $($servicePoint.ConnectionLimit)"
+        Write-Log "     ConnectionName      : $($servicePoint.ConnectionName)"
+        Write-Log "     CurrentConnections  : $($servicePoint.CurrentConnections)"
+        Write-Log "     SupportsPipelining  : $($servicePoint.SupportsPipelining)"
+        Write-Log "     ProtocolVersion     : $($servicePoint.ProtocolVersion)"
+        Write-Log ""
 
-        # 1. Check for Expiration
-        if ($expiry -lt $today) {
-            Write-Error "CRITICAL: This certificate expired on $($expiry.ToShortDateString())!"
-        } elseif ($expiry -lt $today.AddDays(30)) {
-            Write-Warning "Warning: This certificate expires in less than 30 days."
-        } else {
-            Write-Host "Check: Certificate is currently valid." -ForegroundColor Green
+        Write-Log "  -- Certificate (ServicePoint.Certificate) --" -Color Cyan
+        Write-Log "     Subject             : $($cert.Subject)"
+        Write-Log "     Issuer              : $($cert.Issuer)"
+        Write-Log "     EffectiveDate       : $($cert.GetEffectiveDateString())"
+        Write-Log "     ExpirationDate      : $($cert.GetExpirationDateString())"
+        Write-Log "     Format              : $($cert.GetFormat())"
+        Write-Log "     HashString          : $($cert.GetCertHashString())"
+        Write-Log "     SerialNumber        : $($cert.GetSerialNumberString())"
+        Write-Log "     PublicKeyString     : $($cert.GetPublicKeyString())"
+        Write-Log "     KeyAlgorithmParams  : $($cert.GetKeyAlgorithmParametersString())"
+
+        # cert.Handle is an IntPtr, not available on all runtimes
+        try {
+            Write-Log "     Handle              : $($cert.Handle)"
+        } catch {
+            Write-Log "     Handle              : (not available on this runtime)" -Color DarkGray
         }
-        
-    } else { 
-        Write-Error "No certificate could be retrieved." 
+
+        try {
+            $cert2 = [Security.Cryptography.X509Certificates.X509Certificate2]$cert
+
+            Write-Log ""
+            Write-Log "  -- Extended Fields (X509Certificate2) --" -Color Cyan
+            Write-Log "     Thumbprint          : $($cert2.Thumbprint)"
+            Write-Log "     SignatureAlgorithm  : $($cert2.SignatureAlgorithm.FriendlyName)"
+            Write-Log "     Version             : $($cert2.Version)"
+            Write-Log "     FriendlyName        : $(if ($cert2.FriendlyName) { $cert2.FriendlyName } else { '(none)' })"
+            Write-Log "     HasPrivateKey       : $($cert2.HasPrivateKey)"
+            Write-Log "     NotBefore           : $($cert2.NotBefore.ToString('yyyy-MM-dd HH:mm:ss'))"
+            Write-Log "     NotAfter            : $($cert2.NotAfter.ToString('yyyy-MM-dd HH:mm:ss'))"
+
+            $today    = Get-Date
+            $expiry   = $cert2.NotAfter
+            $daysLeft = [math]::Floor(($expiry - $today).TotalDays)
+
+            if ($expiry -lt $today) {
+                Write-Log "     Validity            : [FAIL] Expired $($expiry.ToString('yyyy-MM-dd'))" -Color Red
+            } elseif ($expiry -lt $today.AddDays(30)) {
+                Write-Log "     Validity            : [WARN] Expires $($expiry.ToString('yyyy-MM-dd')) ($daysLeft days)" -Color Yellow
+            } else {
+                Write-Log "     Validity            : [PASS] Expires $($expiry.ToString('yyyy-MM-dd')) ($daysLeft days)" -Color Green
+            }
+
+            Write-Log ""
+            Write-Log "  -- Subject Alternative Names --" -Color Cyan
+            $sanExt = $cert2.Extensions | Where-Object { $_.Oid.FriendlyName -eq "Subject Alternative Name" }
+            if ($sanExt) {
+                $sanLines = ($sanExt | Select-Object -First 1).Format($true) -split "`r?`n"
+                foreach ($line in $sanLines) {
+                    if ($line.Trim()) { Write-Log "     $($line.Trim())" }
+                }
+            } else {
+                Write-Log "     (none)"
+            }
+
+            Write-Log ""
+            Write-Log "  -- Certificate Extensions --" -Color Cyan
+            foreach ($ext in $cert2.Extensions) {
+                $extName = if ($ext.Oid.FriendlyName) { $ext.Oid.FriendlyName } else { "(unknown)" }
+                Write-Log ("     [{0}]  {1}" -f $ext.Oid.Value, $extName)
+            }
+
+        } catch {
+            Write-Log "  [FAIL] X509Certificate2 processing failed: $($_.Exception.Message)" -Color Red
+        }
+
+    } else {
+        Write-Log "  [FAIL] No certificate returned from $agentURL" -Color Red
+    }
+
+} catch {
+    Write-Log "  [FAIL] $($_.Exception.Message)" -Color Red
+}
+
+# ==============================================================================
+# STEP 5 - SSL INSPECTION DETECTION
+# ==============================================================================
+Write-Section "STEP 5 - SSL INSPECTION DETECTION"
+Write-Log ""
+
+if ($cert) {
+    $issuer  = $cert.Issuer
+    $subject = $cert.Subject
+
+    $knownPublicCAs = @(
+        "GlobalSign",
+        "DigiCert",
+        "CyberArk",
+        "Sectigo",
+        "Entrust",
+        "Comodo",
+        "VeriSign",
+        "Let.s Encrypt",
+        "Amazon Root"
+    )
+
+    $matchedCA = $null
+    foreach ($ca in $knownPublicCAs) {
+        if ($issuer -match [regex]::Escape($ca)) {
+            $matchedCA = $ca
+            break
+        }
+    }
+
+    Write-Log "  Subject : $subject"
+    Write-Log "  Issuer  : $issuer"
+    Write-Log ""
+
+    if ($matchedCA) {
+        Write-Log "  [PASS] Issuer matches known public CA: $matchedCA" -Color Green
+    } else {
+        Write-Log "  [FAIL] Issuer does not match any known public CA" -Color Red
+    }
+} else {
+    Write-Log "  [SKIP] No certificate available" -Color DarkGray
+}
+
+# ==============================================================================
+# STEP 6 - CLOUDFLARE IPv4 REACHABILITY (Port 443, one IP per CIDR)
+# ==============================================================================
+Write-Section "STEP 6 - CLOUDFLARE IPv4 REACHABILITY (Port 443)"
+Write-Log ""
+Write-Log "  Testing network address of each CIDR block on port 443."
+Write-Log ""
+
+$cfPass  = 0
+$cfFail  = 0
+$cfTotal = $cloudflareIPv4Ranges.Count
+
+foreach ($cidr in $cloudflareIPv4Ranges) {
+    $testIP = Get-FirstIPFromCIDR -CIDR $cidr
+    try {
+        $result = Test-NetConnection -ComputerName $testIP -Port 443 `
+                    -WarningAction SilentlyContinue -InformationLevel Quiet
+
+        if ($result) {
+            Write-Log ("  [PASS]  {0,-20}  {1}" -f $cidr, $testIP) -Color Green
+            $cfPass++
+        } else {
+            Write-Log ("  [FAIL]  {0,-20}  {1}" -f $cidr, $testIP) -Color Red
+            $cfFail++
+        }
+    } catch {
+        Write-Log ("  [FAIL]  {0,-20}  {1}  ({2})" -f $cidr, $testIP, $_.Exception.Message) -Color Red
+        $cfFail++
     }
 }
 
-# --- Interactive Prompts ---
-$inputUri  = Read-Host "Enter the URI (e.g., https://agents-na.epm.cyberark.com)"
+Write-Log ""
+Write-Log ("  Result : {0} PASS  /  {1} FAIL  /  {2} Total" -f $cfPass, $cfFail, $cfTotal)
 
-Test-SSL -uri $inputUri
+Write-Log ""
+Write-Log "  -- IPv6 Ranges (not tested) --" -Color DarkGray
+foreach ($ipv6 in $cloudflareIPv6Ranges) {
+    Write-Log "     $ipv6" -Color DarkGray
+}
 
-#-------------------------------------------------------------------------------------------
+# ==============================================================================
+# SUMMARY
+# ==============================================================================
+Write-Section "SUMMARY"
+Write-Log ""
+Write-Log "  Region    : $regionName"
+Write-Log "  Agent URL : $agentURL"
+Write-Log "  Host      : $env:COMPUTERNAME"
+Write-Log "  User      : $env:USERNAME"
+Write-Log "  Run Date  : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+Write-Log ""
 
-#Ignore SSL Warning
-[Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-
-# Create Web Http request to URI
-$uri = "https://agents-na.epm.cyberark.com/" 
-$webRequest = [Net.HttpWebRequest]::Create($uri)
-
-# Get URL Information
-$webRequest.ServicePoint
-
-# Retrieve the Information for URI
-$webRequest.GetResponse() | Out-NULL
-
-# Get SSL Certificate information
-$webRequest.ServicePoint.Certificate
+# ==============================================================================
+# SAVE LOG
+# ==============================================================================
+try {
+    $logLines | Out-File -FilePath $logFile -Encoding UTF8
+    Write-Host ""
+    Write-Host "  Log saved: $logFile" -ForegroundColor Cyan
+    Write-Host ""
+} catch {
+    Write-Host "  [FAIL] Could not write log: $($_.Exception.Message)" -ForegroundColor Red
+}
