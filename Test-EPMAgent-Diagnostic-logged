@@ -1,0 +1,448 @@
+# ==============================================================================
+# EPM Agent Network Diagnostic Script
+# Checks  : DNS Resolution, Port 443 TCP, SSL Certificate, SSL Inspection
+# Log     : Plain text log saved to script directory for sharing with vendor
+# ==============================================================================
+
+# Suppress SSL certificate validation errors so we can still retrieve cert info
+[Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# REGION -> AGENT COMMUNICATION URL MAP
+$regionMap = [ordered]@{
+    1  = @{ Name = "USA"               ; URL = "https://agents-na.epm.cyberark.com" }
+    2  = @{ Name = "Germany"           ; URL = "https://agents-eu.epm.cyberark.com" }
+    3  = @{ Name = "Switzerland"       ; URL = "https://agents-ch.epm.cyberark.com" }
+    4  = @{ Name = "UK"                ; URL = "https://agents-uk.epm.cyberark.com" }
+    5  = @{ Name = "Australia"         ; URL = "https://agents-au.epm.cyberark.com" }
+    6  = @{ Name = "Brazil"            ; URL = "https://agents-br.epm.cyberark.com" }
+    7  = @{ Name = "Canada"            ; URL = "https://agents-ca.epm.cyberark.com" }
+    8  = @{ Name = "India"             ; URL = "https://agents-in.epm.cyberark.com" }
+    9  = @{ Name = "Japan"             ; URL = "https://agents-jp.epm.cyberark.com" }
+    10 = @{ Name = "Singapore"         ; URL = "https://agents-sg.epm.cyberark.com" }
+    11 = @{ Name = "Italy"             ; URL = "https://agents-it.epm.cyberark.com" }
+    12 = @{ Name = "UAE"               ; URL = "https://agents-ae.epm.cyberark.com" }
+    13 = @{ Name = "Federal (GovCloud)"; URL = "https://apro78z9ol93v-ats.iot.us-gov-west-1.amazonaws.com" }
+}
+
+$timestamp   = Get-Date -Format "yyyyMMdd_HHmmss"
+$hostname    = $env:COMPUTERNAME
+$logFileName = "EPM-Diagnostic-${hostname}-${timestamp}.log"
+$logPath     = Join-Path -Path $PSScriptRoot -ChildPath $logFileName
+$logLines    = [System.Collections.Generic.List[string]]::new()
+
+function Write-Log {
+    param([string]$Line = "")
+    $logLines.Add($Line)
+}
+
+function Write-Section {
+    param([string]$Title)
+    Write-Host ""
+    Write-Host "----------------------------------------------------------------------" -ForegroundColor DarkCyan
+    Write-Host "  $Title" -ForegroundColor Cyan
+    Write-Host "----------------------------------------------------------------------" -ForegroundColor DarkCyan
+}
+
+Clear-Host
+Write-Host ""
+Write-Host "=====================================================================" -ForegroundColor Yellow
+Write-Host "         CyberArk EPM Agent - Network Diagnostic Tool               " -ForegroundColor Yellow
+Write-Host "=====================================================================" -ForegroundColor Yellow
+Write-Host ""
+Write-Host "  Select your EPM Region:" -ForegroundColor White
+Write-Host ""
+
+foreach ($key in $regionMap.Keys) {
+    Write-Host ("  [{0,2}]  {1}" -f $key, $regionMap[$key].Name) -ForegroundColor Gray
+}
+
+Write-Host ""
+$selection = $null
+
+while ($null -eq $selection) {
+    $input = Read-Host "  Enter region number"
+    if ($regionMap.Contains([int]$input)) {
+        $selection = [int]$input
+    } else {
+        Write-Host "  Invalid selection. Please enter a number between 1 and 13." -ForegroundColor Red
+    }
+}
+
+$selectedRegion = $regionMap[$selection]
+$regionName     = $selectedRegion.Name
+$fullUrl        = $selectedRegion.URL
+$uri            = [System.Uri]$fullUrl
+$targetHost     = $uri.Host
+$port           = 443
+
+Write-Host ""
+Write-Host "  Region   : $regionName" -ForegroundColor White
+Write-Host "  Target   : $fullUrl"    -ForegroundColor White
+Write-Host ""
+
+$results = @{
+    DNS          = $null
+    Port         = $null
+    CertFound    = $null
+    SSLInspect   = $null
+    CertExpired  = $null
+    CertExpiring = $null
+    Issuer       = ""
+    Subject      = ""
+    Expiry       = $null
+    ResolvedIPs  = @()
+}
+$testTime    = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+$osInfo      = (Get-WmiObject -Class Win32_OperatingSystem).Caption
+$osVersion   = (Get-WmiObject -Class Win32_OperatingSystem).Version
+$currentUser = "$env:USERDOMAIN\$env:USERNAME"
+
+# Get all active non-loopback IPv4 addresses
+$machineIPs  = (Get-NetIPAddress -AddressFamily IPv4 |
+                Where-Object { $_.IPAddress -ne "127.0.0.1" -and $_.PrefixOrigin -ne "WellKnown" } |
+                Select-Object -ExpandProperty IPAddress) -join ", "
+
+Write-Log "=============================================================="
+Write-Log "  CyberArk EPM Agent - Network Diagnostic Log"
+Write-Log "=============================================================="
+Write-Log ""
+Write-Log "[MACHINE DETAILS]"
+Write-Log "Hostname        : $hostname"
+Write-Log "Machine IP(s)   : $machineIPs"
+Write-Log "OS              : $osInfo"
+Write-Log "OS Version      : $osVersion"
+Write-Log "Logged-in User  : $currentUser"
+Write-Log "Test Date/Time  : $testTime"
+Write-Log "PowerShell Ver  : $($PSVersionTable.PSVersion.ToString())"
+Write-Log ""
+Write-Log "[TEST TARGET]"
+Write-Log "Region          : $regionName"
+Write-Log "URL             : $fullUrl"
+Write-Log "Hostname        : $targetHost"
+Write-Log "Port            : $port"
+Write-Log ""
+
+Write-Section "CHECK 1 of 4 : DNS Resolution"
+Write-Host "  Resolving hostname: $targetHost ..." -ForegroundColor Gray
+
+Write-Log "=============================================================="
+Write-Log "[CHECK 1] DNS Resolution"
+Write-Log "=============================================================="
+Write-Log "Hostname queried : $targetHost"
+
+try {
+    $dnsResult = [System.Net.Dns]::GetHostAddresses($targetHost)
+    if ($dnsResult.Count -gt 0) {
+        $results.DNS        = $true
+        $results.ResolvedIPs = $dnsResult | ForEach-Object { $_.IPAddressToString }
+        $ipList             = $results.ResolvedIPs -join ", "
+
+        Write-Host "  [PASS] DNS resolved successfully." -ForegroundColor Green
+        foreach ($ip in $results.ResolvedIPs) {
+            Write-Host "         -> $ip" -ForegroundColor DarkGreen
+        }
+
+        Write-Log "Result           : PASS"
+        Write-Log "Resolved IP(s)   : $ipList"
+    }
+} catch {
+    $results.DNS = $false
+    Write-Host "  [FAIL] DNS resolution failed. Cannot resolve $targetHost" -ForegroundColor Red
+    Write-Host "         Error: $($_.Exception.Message)" -ForegroundColor DarkRed
+
+    Write-Log "Result           : FAIL"
+    Write-Log "Error            : $($_.Exception.Message)"
+}
+Write-Log ""
+
+
+
+Write-Section "CHECK 2 of 4 : Port 443 TCP Connectivity"
+Write-Host "  Testing TCP connection to ${targetHost}:${port} ..." -ForegroundColor Gray
+
+Write-Log "=============================================================="
+Write-Log "[CHECK 2] Port 443 TCP Connectivity"
+Write-Log "=============================================================="
+Write-Log "Target           : ${targetHost}:${port}"
+
+if ($results.DNS -eq $false) {
+    Write-Host "  [SKIP] Skipping port check - DNS resolution failed." -ForegroundColor Yellow
+    $results.Port = $false
+    Write-Log "Result           : SKIP (DNS failed)"
+} else {
+    try {
+        $tcpClient = New-Object System.Net.Sockets.TcpClient
+        $connect   = $tcpClient.BeginConnect($targetHost, $port, $null, $null)
+        $wait      = $connect.AsyncWaitHandle.WaitOne(5000, $false)
+
+        if ($wait -and $tcpClient.Connected) {
+            $tcpClient.EndConnect($connect)
+            $results.Port = $true
+            Write-Host "  [PASS] Port 443 is reachable." -ForegroundColor Green
+            Write-Log "Result           : PASS"
+        } else {
+            $results.Port = $false
+            Write-Host "  [FAIL] Port 443 is NOT reachable. Connection timed out." -ForegroundColor Red
+            Write-Host "         Likely cause: Firewall or WAF blocking outbound port 443." -ForegroundColor DarkRed
+            Write-Log "Result           : FAIL"
+            Write-Log "Reason           : TCP connection timed out after 5 seconds"
+        }
+        $tcpClient.Close()
+    } catch {
+        $results.Port = $false
+        Write-Host "  [FAIL] Port 443 connection failed." -ForegroundColor Red
+        Write-Host "         Error: $($_.Exception.Message)" -ForegroundColor DarkRed
+        Write-Log "Result           : FAIL"
+        Write-Log "Error            : $($_.Exception.Message)"
+    }
+}
+Write-Log ""
+
+Write-Section "CHECK 3 of 4 : SSL Certificate Retrieval"
+Write-Host "  Retrieving SSL certificate from $fullUrl ..." -ForegroundColor Gray
+
+Write-Log "=============================================================="
+Write-Log "[CHECK 3] SSL Certificate Retrieval"
+Write-Log "=============================================================="
+Write-Log "URL queried      : $fullUrl"
+
+if ($results.Port -eq $false) {
+    Write-Host "  [SKIP] Skipping certificate checks - Port 443 not reachable." -ForegroundColor Yellow
+    $results.CertFound = $false
+    Write-Log "Result           : SKIP (Port 443 not reachable)"
+} else {
+    try {
+        $req         = [Net.HttpWebRequest]::Create($fullUrl)
+        $req.Timeout = 10000
+
+        try { $null = $req.GetResponse() } catch { }
+
+        $cert = $req.ServicePoint.Certificate
+
+        if ($cert) {
+            $results.CertFound = $true
+            $results.Subject   = $cert.Subject
+            $results.Issuer    = $cert.Issuer
+            $results.Expiry    = [DateTime]::Parse($cert.GetExpirationDateString())
+
+            Write-Host "  [PASS] Certificate retrieved successfully." -ForegroundColor Green
+            Write-Host ""
+            Write-Host "  Subject : $($results.Subject)" -ForegroundColor White
+            Write-Host "  Issuer  : $($results.Issuer)"  -ForegroundColor White
+            Write-Host "  Expires : $($results.Expiry.ToString('yyyy-MM-dd HH:mm:ss'))" -ForegroundColor White
+
+            Write-Log "Result           : PASS"
+            Write-Log "Subject          : $($results.Subject)"
+            Write-Log "Issuer           : $($results.Issuer)"
+            Write-Log "Expiry           : $($results.Expiry.ToString('yyyy-MM-dd HH:mm:ss'))"
+        } else {
+            $results.CertFound = $false
+            Write-Host "  [FAIL] No certificate could be retrieved." -ForegroundColor Red
+            Write-Log "Result           : FAIL"
+            Write-Log "Reason           : No certificate object returned from ServicePoint"
+        }
+    } catch {
+        $results.CertFound = $false
+        Write-Host "  [FAIL] Failed to retrieve certificate." -ForegroundColor Red
+        Write-Host "         Error: $($_.Exception.Message)" -ForegroundColor DarkRed
+        Write-Log "Result           : FAIL"
+        Write-Log "Error            : $($_.Exception.Message)"
+    }
+}
+Write-Log ""
+
+Write-Section "CHECK 4 of 4 : SSL Inspection Detection"
+
+Write-Log "=============================================================="
+Write-Log "[CHECK 4] SSL Inspection Detection"
+Write-Log "=============================================================="
+Write-Log "Expected issuer  : GlobalSign (CyberArk signed - known good)"
+Write-Log "Actual issuer    : $($results.Issuer)"
+
+if ($results.CertFound -ne $true) {
+    Write-Host "  [SKIP] Cannot check for SSL inspection - no certificate available." -ForegroundColor Yellow
+    $results.SSLInspect = "Unknown"
+    Write-Log "Result           : SKIP (no certificate available)"
+} else {
+    Write-Host "  Checking certificate issuer for SSL/TLS interception ..." -ForegroundColor Gray
+    Write-Host "  Expected issuer (known good): GlobalSign (CyberArk signed)" -ForegroundColor DarkGray
+    Write-Host "  Actual issuer found         : $($results.Issuer)" -ForegroundColor DarkGray
+    Write-Host ""
+
+    if ($results.Issuer -like "*GlobalSign*") {
+        $results.SSLInspect = $false
+        Write-Host "  [PASS] Issuer contains 'GlobalSign' - Certificate is legitimate." -ForegroundColor Green
+        Write-Host "         No SSL inspection detected." -ForegroundColor DarkGreen
+        Write-Log "Result           : PASS - No SSL inspection detected"
+    } else {
+        $results.SSLInspect = $true
+        Write-Host "  [FAIL] Issuer does NOT contain 'GlobalSign'." -ForegroundColor Red
+        Write-Host "         SSL/TLS Inspection is ACTIVE on this network." -ForegroundColor Red
+        Write-Host "         A proxy/WAF is intercepting traffic and re-signing with:" -ForegroundColor DarkRed
+        Write-Host "         $($results.Issuer)" -ForegroundColor DarkRed
+        Write-Host ""
+        Write-Host "         The EPM Agent does NOT support SSL/TLS inspection." -ForegroundColor Yellow
+        Write-Host "         You must exempt EPM URLs from SSL inspection on your proxy/WAF." -ForegroundColor Yellow
+        Write-Host "         (e.g., ZScaler, Fortigate, Websense, etc.)" -ForegroundColor Yellow
+        Write-Log "Result           : FAIL - SSL inspection is active"
+        Write-Log "Intercepted by   : $($results.Issuer)"
+    }
+
+    # Expiry check
+    Write-Host ""
+    Write-Host "  Checking certificate expiry ..." -ForegroundColor Gray
+    $today = Get-Date
+
+    Write-Log ""
+    Write-Log "-- Certificate Expiry --"
+    Write-Log "Expiry date      : $($results.Expiry.ToString('yyyy-MM-dd HH:mm:ss'))"
+    Write-Log "Check date       : $($today.ToString('yyyy-MM-dd HH:mm:ss'))"
+
+    if ($results.Expiry -lt $today) {
+        $results.CertExpired  = $true
+        $results.CertExpiring = $false
+        Write-Host "  [FAIL] CRITICAL: Certificate EXPIRED on $($results.Expiry.ToString('yyyy-MM-dd'))!" -ForegroundColor Red
+        Write-Log "Expiry result    : FAIL - Certificate is EXPIRED"
+    } elseif ($results.Expiry -lt $today.AddDays(30)) {
+        $results.CertExpired  = $false
+        $results.CertExpiring = $true
+        $daysLeft = ($results.Expiry - $today).Days
+        Write-Host "  [WARN] Certificate expires in $daysLeft day(s) on $($results.Expiry.ToString('yyyy-MM-dd'))." -ForegroundColor Yellow
+        Write-Log "Expiry result    : WARN - Expires in $daysLeft day(s)"
+    } else {
+        $results.CertExpired  = $false
+        $results.CertExpiring = $false
+        $daysLeft = ($results.Expiry - $today).Days
+        Write-Host "  [PASS] Certificate is valid. Expires in $daysLeft day(s) on $($results.Expiry.ToString('yyyy-MM-dd'))." -ForegroundColor Green
+        Write-Log "Expiry result    : PASS - Valid for $daysLeft day(s)"
+    }
+}
+Write-Log ""
+
+Write-Host ""
+Write-Host "=====================================================================" -ForegroundColor Yellow
+Write-Host "                     DIAGNOSTIC SUMMARY                             " -ForegroundColor Yellow
+Write-Host "=====================================================================" -ForegroundColor Yellow
+Write-Host ""
+Write-Host ("  Region   : {0}" -f $regionName) -ForegroundColor White
+Write-Host ("  URL      : {0}" -f $fullUrl)    -ForegroundColor White
+Write-Host ""
+
+$dnsStatus = if ($results.DNS -eq $true) { "[PASS]" } elseif ($results.DNS -eq $false) { "[FAIL]" } else { "[SKIP]" }
+$dnsColor  = if ($results.DNS -eq $true) { "Green"  } elseif ($results.DNS -eq $false) { "Red"    } else { "Yellow" }
+Write-Host ("  DNS Resolution   : {0}" -f $dnsStatus) -ForegroundColor $dnsColor
+
+$portStatus = if ($results.Port -eq $true) { "[PASS]" } elseif ($results.Port -eq $false) { "[FAIL]" } else { "[SKIP]" }
+$portColor  = if ($results.Port -eq $true) { "Green"  } elseif ($results.Port -eq $false) { "Red"    } else { "Yellow" }
+Write-Host ("  Port 443 TCP     : {0}" -f $portStatus) -ForegroundColor $portColor
+
+$sslStatus = if ($results.SSLInspect -eq $false) { "[PASS] Not Detected" } `
+             elseif ($results.SSLInspect -eq $true) { "[FAIL] DETECTED"   } `
+             else { "[SKIP]" }
+$sslColor  = if ($results.SSLInspect -eq $false) { "Green" } `
+             elseif ($results.SSLInspect -eq $true) { "Red"  } `
+             else { "Yellow" }
+Write-Host ("  SSL Inspection   : {0}" -f $sslStatus) -ForegroundColor $sslColor
+
+$expStatus = if ($results.CertExpired -eq $true)  { "[FAIL] EXPIRED"        } `
+             elseif ($results.CertExpiring -eq $true) { "[WARN] Expiring Soon" } `
+             elseif ($results.CertExpired -eq $false -and $results.CertExpiring -eq $false) { "[PASS] Valid" } `
+             else { "[SKIP]" }
+$expColor  = if ($results.CertExpired -eq $true)  { "Red"    } `
+             elseif ($results.CertExpiring -eq $true) { "Yellow" } `
+             elseif ($results.CertExpired -eq $false -and $results.CertExpiring -eq $false) { "Green"  } `
+             else { "Yellow" }
+Write-Host ("  Certificate      : {0}" -f $expStatus) -ForegroundColor $expColor
+
+# Root cause verdict
+Write-Host ""
+Write-Host "  ROOT CAUSE:" -ForegroundColor Cyan
+Write-Host ""
+
+$verdict = ""
+
+if ($results.DNS -eq $false) {
+    $verdict = "DNS FAILURE - Hostname $targetHost cannot be resolved. Check DNS settings."
+    Write-Host "  >> DNS FAILURE" -ForegroundColor Red
+    Write-Host "     The EPM agent hostname cannot be resolved on this machine." -ForegroundColor Red
+    Write-Host "     Check DNS settings, internal DNS servers, or split-DNS configuration." -ForegroundColor Yellow
+    Write-Host "     Ensure $targetHost is resolvable from this endpoint." -ForegroundColor Yellow
+
+} elseif ($results.Port -eq $false) {
+    $verdict = "NETWORK / FIREWALL BLOCKING - Port 443 TCP not reachable to $targetHost"
+    Write-Host "  >> NETWORK / FIREWALL BLOCKING" -ForegroundColor Red
+    Write-Host "     DNS resolved, but port 443 TCP is not reachable." -ForegroundColor Red
+    Write-Host "     A firewall, WAF, or network policy is blocking outbound HTTPS traffic." -ForegroundColor Yellow
+    Write-Host "     Ensure port 443 TCP is open to $targetHost" -ForegroundColor Yellow
+
+} elseif ($results.SSLInspect -eq $true) {
+    $verdict = "SSL/TLS INSPECTION ACTIVE - Certificate intercepted by: $($results.Issuer)"
+    Write-Host "  >> SSL/TLS INSPECTION ACTIVE" -ForegroundColor Red
+    Write-Host "     Network and DNS are reachable, but a proxy/WAF is intercepting" -ForegroundColor Red
+    Write-Host "     the HTTPS connection and replacing the CyberArk certificate." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "     The EPM Agent does NOT support SSL/TLS inspection (man-in-the-middle)." -ForegroundColor Yellow
+    Write-Host "     You must exempt the following URL from SSL inspection:" -ForegroundColor Yellow
+    Write-Host "     $fullUrl" -ForegroundColor White
+    Write-Host ""
+    Write-Host "     Refer to your proxy/WAF documentation for exclusion steps:" -ForegroundColor Yellow
+    Write-Host "     ZScaler  : https://help.zscaler.com/zia/certificate-pinning-and-ssl-inspection" -ForegroundColor DarkYellow
+    Write-Host "     Fortigate: Refer to SSL/SSH Inspection profile exemptions." -ForegroundColor DarkYellow
+    Write-Host "     Websense : Refer to SSL Manager bypass rules." -ForegroundColor DarkYellow
+
+} elseif ($results.CertExpired -eq $true) {
+    $verdict = "CERTIFICATE EXPIRED - Server certificate has expired"
+    Write-Host "  >> CERTIFICATE EXPIRED" -ForegroundColor Red
+    Write-Host "     Network connectivity and SSL inspection checks passed." -ForegroundColor Gray
+    Write-Host "     However, the server certificate has EXPIRED." -ForegroundColor Red
+    Write-Host "     Contact CyberArk Support if the EPM service cert is expired." -ForegroundColor Yellow
+
+} elseif ($results.CertExpiring -eq $true) {
+    $verdict = "CERTIFICATE EXPIRING SOON - Expires within 30 days"
+    Write-Host "  >> CERTIFICATE EXPIRING SOON" -ForegroundColor Yellow
+    Write-Host "     All checks passed. No immediate connectivity issue detected." -ForegroundColor Green
+    Write-Host "     However, the certificate expires within 30 days." -ForegroundColor Yellow
+    Write-Host "     Monitor closely. Contact CyberArk Support if needed." -ForegroundColor Yellow
+
+} elseif ($results.DNS -eq $true -and $results.Port -eq $true -and $results.SSLInspect -eq $false -and $results.CertExpired -eq $false) {
+    $verdict = "NO ISSUES DETECTED - All checks passed"
+    Write-Host "  >> NO ISSUES DETECTED" -ForegroundColor Green
+    Write-Host "     DNS, port connectivity, SSL certificate, and issuer all look healthy." -ForegroundColor Green
+    Write-Host "     If EPM Agent is still not communicating, consider checking:" -ForegroundColor Yellow
+    Write-Host "     - Agent service status on the endpoint" -ForegroundColor DarkYellow
+    Write-Host "     - Proxy configuration in the EPM agent installer settings" -ForegroundColor DarkYellow
+    Write-Host "     - Agent logs for application-level errors" -ForegroundColor DarkYellow
+
+} else {
+    $verdict = "INCONCLUSIVE - One or more checks could not complete"
+    Write-Host "  >> INCONCLUSIVE - One or more checks could not complete." -ForegroundColor Yellow
+    Write-Host "     Review the individual check results above for details." -ForegroundColor Yellow
+}
+
+Write-Host ""
+Write-Host "=====================================================================" -ForegroundColor Yellow
+Write-Host ""
+
+
+Write-Log "=============================================================="
+Write-Log "[SUMMARY]"
+Write-Log "=============================================================="
+Write-Log "DNS Resolution   : $dnsStatus"
+Write-Log "Port 443 TCP     : $portStatus"
+Write-Log "SSL Inspection   : $sslStatus"
+Write-Log "Certificate      : $expStatus"
+Write-Log ""
+Write-Log "ROOT CAUSE VERDICT: $verdict"
+Write-Log ""
+Write-Log "=============================================================="
+Write-Log "End of diagnostic log - $testTime"
+Write-Log "=============================================================="
+
+try {
+    $logLines | Out-File -FilePath $logPath -Encoding UTF8
+    Write-Host "  Log saved to: $logPath" -ForegroundColor Cyan
+    Write-Host ""
+} catch {
+    Write-Host "  [WARNING] Could not save log file: $($_.Exception.Message)" -ForegroundColor Yellow
+}
